@@ -1,0 +1,556 @@
+#!/usr/bin/env tclsh
+
+###############################################################################
+# A small utility box to connect to an embedded board using
+# OpenOCD.
+#
+# Allows to use standard scripts provided with openocd or user scripts
+# in ~/.ocd/scripts/ or in the project config directory
+#
+# (C) 2016-2021 Eric Bouchare
+# 
+# MIT License
+###############################################################################
+package require Tk
+
+lappend ::auto_path .
+
+############ util proc to get openocd install dir tree ########################
+proc getpath {prog} {
+	set pathlst [split $::env(PATH) ":"]
+	foreach dir $pathlst {
+		if {[file executable [file join $dir $prog]]} {
+			return [file dirname $dir]
+		}
+	}
+	return ""
+}
+############ auto completion for combobox #####################################
+# credit: https://github.com/jcowgar/misctcl/blob/master/combobox/combobox.tcl
+namespace eval ttk::combobox {}
+
+# Required to escape a few characters due to the string match used.
+proc ttk::combobox::EscapeKey { key } {
+    switch -- $key {
+        bracketleft  { return {\[} }
+        bracketright { return {\]} }
+        asterisk     { return {\*} }
+        question     { return {\?} }
+        quotedbl     { return {\"} }
+        quoteright   -
+        quoteleft    { return {\'} }
+        default      { return $key }
+    }
+}
+
+proc ttk::combobox::PrevNext { W dir } {
+    set cur [$W current]
+
+    switch -- $dir {
+        up {
+            if {$cur <= 0} {
+                return
+            }
+
+            incr cur -1
+        }
+        down {
+            incr cur
+
+            if {$cur == [llength [$W cget -values]]} {
+                return
+            }
+        }
+    }
+
+    $W current $cur
+    event generate $W <<ComboboxSelected>> -when mark
+}
+
+proc ttk::combobox::CompleteEntry { W key } {
+    if { [string length $key] > 1 && [string tolower $key] != $key } {
+        return
+    }
+
+    if { [$W instate readonly] } {
+        set value [EscapeKey $key]
+    } else {
+        set value [string map { {[} {\[} {]} {\]} {?} {\?} {*} {\*} } [$W get]]
+        if { [string equal $value ""] } {
+            return
+        }
+    }
+
+    set values [$W cget -values]
+
+    set start 0
+    if { [string match -nocase $value* [$W get]] } {
+        set start [expr { [$W current] + 1 }]
+    }
+
+    set x [lsearch -nocase -start $start $values $value*]
+    if { $x < 0 } {
+        if { $start > 0} {
+            set x [lsearch -nocase $values $value*]
+
+            if { $x < 0 } {
+                return
+            }
+        } else {
+            return
+        }
+    }
+
+    set index [$W index insert]
+    $W set [lindex $values $x]
+    $W icursor $index
+    $W selection range insert end
+
+    if { [$W instate readonly] } {
+        event generate $W <<ComboboxSelected>> -when mark
+    }
+}
+
+proc ttk::combobox::CompleteList { W key { start -1 } } {
+    set key [EscapeKey $key]
+
+    if { $start == -1 } {
+        set start [expr { [$W curselection] + 1 }]
+    }
+
+    for { set idx $start } { $idx < [$W size] } { incr idx } {
+        if { [string match -nocase $key* [$W get $idx]] } {
+            $W selection clear 0 end
+            $W selection set $idx
+            $W see $idx
+            $W activate $idx
+            return
+        }
+    }
+
+    if { $start > 0 } {
+        CompleteList $W $key 0
+    }
+}
+
+bind ComboboxListbox <KeyPress>   { ttk::combobox::CompleteList %W %K }
+bind ComboboxListbox <Alt-Up>     { ttk::combobox::LBSelected %W }
+
+bind TCombobox       <KeyRelease> { ttk::combobox::CompleteEntry %W %K }
+bind TCombobox       <Up>         { ttk::combobox::PrevNext %W up }
+bind TCombobox       <Down>       { ttk::combobox::PrevNext %W down }
+bind TCombobox       <Alt-Down>   { ttk::combobox::Post %W }
+
+###############################################################################
+namespace eval Ocd {
+	set ocd(app:version)		1.0
+	
+	if {[info exists env(SDK)]} {
+		set ocd(SDK)	$env(SDK)
+    } else {
+	    set ocd(SDK)	/usr/local
+	    puts "Warning: no SDK env var defined, defaults to $ocd(SDK)"
+    }
+		
+	set ocd(img:connect-on) [image create photo -data {
+		R0lGODlhIAAgAOf6AFNVUFRWUlVXU1ZYVFdZVVhaVlpcWFtdWVxeWl5gXF9hXWFjXmFjX2NlYWRm
+		YmVnY2dqZWhqZmhrZ2psZ2psaGxuaWxua2xvam1vam1wam1wbW5xbnBybnBzb3Fzb3J0b3J0cXN1
+		cHN2cXN2cnR3cnZ4c3Z5dHd5c3d5dHt+eXx+eX1+eX2AfH6Ae4CCfYKEfoKFf4OFgIOFgYWGgYSH
+		gYSHgoaHgoKLdW+XOIaJhIeJhHCZN3GZOHGaOImLhnGaOXKaO3ObO3ObPHSbPYuNiHWcPouOiI2Q
+		ipCSjJKUj3yiSJKVj5SVkZSXkYClS4ClToGlT5aZk4KmUIOmUYKnT4OnUIOnUYOnU4KpTpmblYWo
+		VYWqVIaqUoaqVJudl4itVp2gmomtVYitWIeuU56gm4iuVYivVYmvU4ewT5+inImxUYuwWI2vX4qx
+		VaGjnYqxV6GjnouxWKKkno2xXIuzU42yWY2yWo+xX42zWY20WY+zXo20Woy1VY+0Wo+0XY61V461
+		Wo+1WpKzZpC1W5K0Y5G1YJC2W5C2XI+3V5S0ZpK1Yqapo5S1ZJG3XJa0a6aqo5K3XpG4WZK3YJG4
+		W5S2ZpG4XJa1bJW2Z5S3ZJO4X5W3ZKirpKirpZK5XKirppO5XJa3aZW4ZZa4aZm3bpm4bpq4b5i5
+		a5m5a5u4c5y4c5u5cZu5cpy5c525dpy6cp66d5+7eKC7eqC8eqK9fbG0rbK0rqO+f7S1srO2sLW2
+		s7W4sba4sba5sre5tbi8tbm8tLm8tbm9trq9try+uL7Bu8HCwcHEv8PGv8THwcXIwsbJw8fJw8nL
+		xsvMy8rNx8vOyc7Qy8/RzNDRz9HSztLT0NLUz9PU0NTW0tbX09bY1NfY1NfZ1NnZ1tnb19rb19rb
+		2Nrc2Nvc2dzd2d3f297f29/f3N/g3OHi3+Lj4OPk4eTl4eXm5Obn5efo5erq6Orr6Orr6evr6ezs
+		6u3t7O7u6+7u7O/v7fDw7vX29Pb39f///////////////////////yH5BAEKAP8ALAAAAAAgACAA
+		AAj+AP8JHEiwoMGDCBMqXIjwkZw0YLxkidIkCZIjRnzooAHDRYsUKximMZeuXTx79N6tQ0fuW7Zq
+		0JwpQ3asBEMv5YoI2cmTZxAgQIEMQeaBYZRxP6ZIgfLkSipHUpRosTUr1qsfyDAwXCLuhxUrVaiw
+		YSXIiZNVsmC1QoU1AsMj4X5s6cKFSyJSYrDccaWq1ChLWB0w9NGtx5cvZcKIYjTGzClToC5RIsQD
+		mQKCDiFKpGgRo0aOHlPcwKSokJ45lQ8QHFnyZMqVLV/GnHnshJ8+eN6c2ZFsAEGcOnv2/Bl06Ic/
+		fOioQbNDme+BR5Mubfo06tSqV5FlwLGje/dlzwX+cvUKVixZs2jVskVGwds3bdaiPXNOEK5cunbx
+		6uXrFzAyBwIEKKAAqg1EmGGIKcaYY5BJRhkyDCyyUA3c9LBGHHHYoUkebUgSCmmmoYYMArfAoZAL
+		2/RQxx59DHJIIIZkAskhuOnGWwHuzOPBJrv48kswBKmADQ+ADNJIJZ180skkkSCS3HLNDRBAAQEQ
+		RAswA6FwjXdcdskleAIx4UktuujCizADhTDNNuCQc44667CzjjrntASffM6JwIIJIBAhgw0FjVDB
+		BBA80MACCSBgQAEDDiiBMbgQA4YPw7zAECf3yCPPPZzAg08+oIYqaj7SXKCQG700U0wxzeRCxgdf
+		BBQg66y0FnAZQhzMU8+uvOrIo49AMkQQAIwGYKyxVFqJpbALiUmmmWguNIMLHeSggbXYbkDCnn3+
+		yWwMzHihkQ7kkusFpJJSailDFlAz6rujlsqQArXWa++tzOa7UEAAOw==
+	}]
+	set ocd(img:connect-off) [image create photo -data {
+		R0lGODlhIAAgAOfNAMUBCM0AAM8ABM0UFtIcGu8nJPApK1NUUlRVU1ZXVVZYVVdZVoNOTFhaV1pc
+		WVtdWlxeW15gXV9hXmFjYGNlYmRlY2VmZE50IVF1GlJ2G2hpZ1F3JOtGR/NERGhqZ1J4JfRFRVN5
+		JmpsaVR6J2xua21vbHBvZ25wbW9xbnByb3FzcHJ0cWGALnN1cnR2c2OCMHV3dGSDMXZ4dXd5dnp5
+		cWWFOWKHNGeGNGaGOmeHO1+LLmmINmiIPGqJN2eLMWONKXx+e2qKPmaMOGyLOWeNOGWPK36AfWmO
+		M2aQLHyDbW6NO4CCf2uQNWqQO2iSLmuRPG2SN4WEfGySPWiUN4OFgnKRPm6TOIaFfW2TPmuVMYSG
+		g3GSRW+UOWyWMmqWOfVoaXSTP4WHhHKTRnCVOoiHf3GWO3CWQXaVQYeJhneWQnWWSXiXQ4mLiHaX
+		SnqWUHeYS3WYUXSaRYuNiniZTHmaTY2PjH6aVHyaWnucT4CcVpOSioGdV5KUkYOfWYKfX5OVkoOg
+		YJSWk4ifYImgYZaYlYuiY4miaZuako2kZYuka4ylbJ2clI6mbZ6gnaCin6OjmqGjoKSkm6SqoKep
+		pqiqp6uqoamrqLSzq/ugoLK0sbO1srS2s7m4r7e5trq5sLy7sra9sr28s7e+s7u9ur7BvcHDv8LE
+		wcfGvcXHxMbIxcfJxsnLyMrMycvOys7QzM/RztDSz9HT0NLU0dTW09XX1NbY1dja1tnb19rc2dvd
+		2vzW1t3f3N7g3eDi3+Hk4OPl4eTm4+Xn5Obo5ejq5+nr6Ors6evu6u3v6+7w7e/x7vT38/b49P7/
+		/P//////////////////////////////////////////////////////////////////////////
+		////////////////////////////////////////////////////////////////////////////
+		/////////////////////////////////////////////////////yH5BAEKAP8ALAAAAAAgACAA
+		AAj+AP8JHEiwoMGDCBMqXIhQUiRHjRYdIhSIj546ctigIXNliREgQBg64vVLGDFkx4j98rXrli1Z
+		rlilQnVKBsNFu0Z82Mmz54afG0KgUsGQ0K4MOXDUqMFD0J0cLIIwYpTIUAZUJRjyuYU06Y0tgNzE
+		eOEHUaFBgK56YFiHa48eO3bA2aPEhhg/ffbksXO1AkM2XIcIGUynzWA8eOjMeaPmqgSCDiFKpGgR
+		o0aOHoEkWZPGTJUqVx8QHFnyZMqVLV/GnHmKBhYoTI74wJBKAUGcOnvqBhoU1QomSIr80EHb9kCj
+		SJUydQpVKlWrqExcwECduirjArd2xfE17NiyZ9P+ohJxyyXMVrUJts3wNu7cunfz7u2boL79BKIH
+		As4gmLBhIYgpxthVE0yyUBi2ZNDEgk+sgcURZ8TBmWegoQKBJpAotESCT7xmhRVQQFHGGCDGNlsq
+		DQxjjAqVcALKJ6IQBAQtGYTIxY1edJHFFE4EN1xxCDSAAEGXfDLQDLNUp+SSSl4n0B+WZMIJJ56E
+		MlALrthyyy6+/FKSlyyZ5wp6CrhgxAwryEFFGAW5QIIIGlhAwQQRQOBAA/fdx8AAAfTpZwACKERJ
+		MsUUkwwlxCizzKLLEMDBF5BG+gUHgR70SCeslFIKK5s0ssICDYQawBcGgFDAqSAY8EUAB6VgzDGK
+		sMa6YosvjgoCM5gUgAkzIKx60AF4IiCssEISNKquzOiCawG+MjQQlFJycmwByupyarP/aLGECmic
+		0O23KMBwZpprHrursrliS8Uqi2iExrvvLmLKJqQ0wsYoUdi67K69svoPCbEwKvDAArsyaqmnFpBq
+		sxKE6vDDED8MwKOSQkqpswkJ8KefgQYEADs=
+	}]
+	set ocd(img:connect-err) [image create photo -data {
+		R0lGODlhIAAgAOfsAKEAAqIAA6QBAKkAAKMCBKUEAKUEBZwKD80AAM4ABM8ABKgMD9IDEKsREawT
+		GKUYFcEjJtQgIpgyMqszMNcwLMc0N1NUUl9STlRVU9gxM8g2ONkzNFZXVdI2N1ZYVdo0NVdZVsY8
+		OVhaV8c9OlpcWVtdWlxeW9I/P15gXds/Pl9hXtZCQm1fW2FjYLBOTGNlYmRlY2VmZE50IVF1GttI
+		TFJ2G2hpZ1F3JGhqZ1J4JVN5JmpsaVR6J2xua21vbHBvZ25wbddUVG9xbnByb3FzcHJ0cWGALnN1
+		ct1ZWXR2c2OCMN5aWnV3dGSDMXZ4ddleX3d5dnp5cWWFOWKHNOJdXGeGNGaGOmeHO1+LLmmINmiI
+		PGqJN2eLMWONKXx+e2qKPmaMOGyLOWeNOGWPK36AfWmOM2aQLHyDbW6NO4CCf2uQNWqQO2iSLmuR
+		PG2SN+BrZ4WEfGySPWiUN4OFgnKRPm6TOIaFfW2TPuBsbmuVMYSGg3GSRW+UOWyWMmqWOXSTP4WH
+		hHKTRnCVOoiHf3GWO3CWQXaVQYeJhneWQnWWSXiXQ4mLiHaXSnqWUHeYS3WYUXSaRYuNiniZTHma
+		TY2PjH6aVHyaWnucT4CcVpOSioGdV5KUkYOfWYKfX5OVkoOgYJSWk4ifYImgYZaYlYuiY4miaZua
+		ko2kZYuka4ylbJ2clI6mbZ6gnaCin6OjmqGjoKSkm6SqoKepprCooaiqp6uqoamrqLSzq7K0sbO1
+		srS2s7m4r7e5trq5sLy7sra9sr28s7e+s7u9ur7BveC5tMHDv8LEwcfGvcXHxMbIxcfJxsnLyMrM
+		ycvOys7QzM/RztDSz9HT0NLU0dTW09XX1NbY1dja1tnb19rc2dvd2t3f3N7g3eDi3+Hk4OPl4eTm
+		4+Xn5Obo5ejq5+nr6Ors6evu6u3v6+7w7e/x7vT38/b49P7//P//////////////////////////
+		/////////////////////////////////////////////////////yH5BAEKAP8ALAAAAAAgACAA
+		AAj+AP8JHEiwoMGDCBMqXIgwFqxWrFSZGgVqUyZKkRYdGmQnDRkvXhi22uYt3Lhz5sZ566btmjVp
+		zpglQ3bMCUNV2njk2Mmz542fN3QgI8JwlLYaV6xIkaIllKUrRr6sWoWqVA1kPhhuuoY0aZU9nxo1
+		UdLpFClRn67iYEiJ65YtWbI80oRmSqBOnDRhqnQVBsNFXMOAGTyJ0eBLlyZJcpToqgqCDiFKpGgR
+		o0aOHr2cUYSoEB06V0sQHFnyZMqVLV/GnHksyh03aspwmZHMA0GcOnvqBhoUWRE1ZsZ0wULb9kCj
+		SJUydQpVKlWryH7ImEGdujLjArd2tfI17NiyZ9P+IttxzSXMZrUJtq3xNu7cunfz7u3Lob59DqIH
+		Aq4hmLBhMIgpxthVLciyECDW1LDGgm0ockcZhkDCmWegIWNCLq8olEaCbbxWRx1uuEGIICDGNlsy
+		IohTDhG17PKLL8EQ5AU1NYTIx41+9JGHHGwEN1xxGIiAAUG3+DIQFNNUp+SSSl4nkCe24LLLLr0A
+		M9ARzlhzjTbdeFOSlyyZ5wx6HiRBBhRFRDIHIAUl0cMONsTwQgsomECCCPfdh4Mxs7jwAAEOSMAQ
+		LeiQQw46tIyTjjqMMkpMAyM8gccTIRCgkCu8MFNMMczowkoRIIgg6gUBBEFFCh+kQEUQBSA0RDmn
+		5sQq64otvjiBBlRsoKuuVGjQqkEW4InBsMMKSdACSKSwq64pIDEAQwRBKeUuBrzxwTrYYsvAEr/+
+		o0caRBwChLjkCsHEmWmuOcAKG1AQAQMJIMDACc8KNMcyqmh0yL77qmKMLsOwsogwcBwAwQcIJJzw
+		BxAAIFAP0TQq8cQSO8NCAR18AC8DH3TQrQqihizyyCI/VgAEJ9BwAgTdQqsQAAXE7LBAAQEAOw==
+	}]
+	set ocd(img:reset) [image create photo -data {
+		R0lGODlhGAAYAIYAAPwCBBRSDKS+nLTCrBxWFKzCpIy6fJS6hIy2hIy6hIS2fHyudHyqdCROHAw2
+		VAwmBFyGVFySVGyiZGyqbHyydFyaVCRKHLTe7Ex2RHSubFSOTBw+FIzG3ITC1Ex+RERyPEyGRFya
+		XGSmXIS+1IzC3IS+3EyOTFymXGyqZBQ2DHS2zHy21DRqNEyKRHSuzAwqBDx2PESaRFSiVBQ+ZGyq
+		xGSixFyavARCZBRSFDyCPDyKPESKRFSaVEyeTEyWTCRiHAQuPGSivFSStDR2nDyaRESWRESaTDyS
+		PDSKNESGrFSOrER6lBxWdCxuLDyWPBx6JDRulFSSvDRmhBxWfCRuJCyONAwuREyKtDRylDRqjCSK
+		LCRqJCxijCxihDx+pCxqlCxqjAwyPCxmhDR2pDx2nCRejCxunDRynCRehCRmlBQ2RAAAAAAAAAAA
+		AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACH5
+		BAEAAAAALAAAAAAYABgAAAf/gACCg4SFhoeEAYqKiI2KAgIDAwIEBI2FAQUDBgcIBwYCCJaXAAED
+		CQoICwoKBqwMDZeZCg4PEBESE6sUChUWjhQOFxcPGBAQFRIUGRQaG4cBE8IcHB0PHh8gISIZGRIP
+		0MIj4yQlDx8eJhUnKCcfKYbCKivz9Q8sICYhJyIt4ITCXAgcOPAFDAgxTsioAA+ggxkcaEisYeMG
+		jhw6dvDoEcPHD0aEgLiwUSOIkCEPchAp4iNGDyNHkOT4NwhIEhtCbChZwuRFEyROgjrJ8YTmIAdQ
+		hEQRclLKlAdUqkitUtTKIQdXkiTJiiULkwc/tGjZ8oALkKtdvGhV+wXM0ydFQ5mEaeRAzJAxXsaQ
+		AVPm6wMmYs42AiJmzJAhZs58QYMGsOBLQNCYSTN5chomakjVBDIFTRrGQB5rFhS69OjTqFHLCAQA
+		Ow==
+	}]
+	
+	set ::Ocd::id 0
+
+	wm withdraw .
+}
+
+proc Ocd::new {args} {
+	variable ocd
+	variable id
+	
+	set v $id
+	
+	# create new object
+	set obj ::Ocd::inst$id
+	upvar $obj self
+	incr id
+	
+	# load config file ~/.ocd/ocdrc
+	if {![file exists "$::env(HOME)/.ocd"] || ![file exists "$::env(HOME)/.ocd/scripts"]} {
+		file mkdir $::env(HOME)/.ocd
+		file copy $ocd(SDK)/share/ocd/scripts $::env(HOME)/.ocd/
+	}
+
+	catch {
+		foreach f [glob -dir $::env(HOME)/.ocd/scripts _*.cfg] {
+			file delete -force $f
+		}
+	} rc
+	
+	catch {
+		set localscripts [lsort [glob -tails -dir $::env(PWD)/config *.cfg]]
+		set userscripts [lsort [glob -tails -dir $::env(HOME)/.ocd/scripts *.cfg]]
+		set distscripts [lsort [glob -tails -dir [getpath openocd]/share/openocd/scripts/board *.cfg]]
+	} rc
+		
+	set self(openocd_dir)		[getpath openocd]
+	set self(label:connect) 	"Target not connected"
+	set self(data:connected) 	false
+	set self(data:script) 		[file tail [lindex $distscripts 0]]; # updated with config file
+	set self(data:localscripts) $localscripts
+	set self(data:userscripts)  $userscripts
+	set self(data:distscripts)  $distscripts
+	set self(data:scripts)		[concat $localscripts $userscripts $distscripts]
+	set self(var:cmd)			{}
+	set self(var:cmd:hist)		{}
+	set self(var:cmd:hist:pos)	0
+	set self(flash:file)		{}
+		
+	if {[file exists "$::env(HOME)/.ocd/ocdrc"]} {
+		set fp [open "$::env(HOME)/.ocd/ocdrc"]
+		if {[catch {read $fp} rc] || [catch {array set self $rc} erc]} {
+			puts "Config options corrupted: $erc"
+		}
+	}
+	
+	# set up object
+	toplevel [set w .inst$v]
+	wm protocol $w WM_DELETE_WINDOW "Ocd::exit ::Ocd::inst$v"
+    wm title $w "OpenOCD"
+	wm geom $w 400x500
+	set self(wid:top) $w
+	
+	# notebook
+	pack [ttk::notebook $w.nb -takefocus 0] -fill x -side top
+	## Connect notebook page
+	set fc [ttk::labelframe $w.nb.fc -padding 10 -text "Choose target to connect to"]
+	$w.nb add $fc -text "Connect"
+	pack [ttk::combobox $fc.scripts -textvariable ${obj}(data:script) -state normal -values $self(data:scripts)] -side top -fill x -expand 1 -pady 5
+	pack [frame $fc.f] -side left
+	pack [checkbutton $fc.f.connect -padx 5 -pady 5 -indicatoron 0 \
+		-compound left -text "Connect to target" \
+		-image $ocd(img:connect-off) -selectimage $ocd(img:connect-on) \
+		-variable "${obj}(data:connected)" \
+		-command "::Ocd::connect $obj"] -fill x
+	pack [button $fc.f.reset -state disabled -padx 5 -pady 5 -compound left \
+		-text "Reset and halt target" -image $ocd(img:reset) -command "::Ocd::ev_cmd_reset $obj"] -fill x
+	pack [label $fc.lbl -textvariable ${obj}(label:connect) -fg red \
+		-justify center] -side left -expand 1
+		
+	## Flash notebook page
+	set ff [ttk::labelframe $w.nb.ff -padding 10 -text "Choose an image file to be flashed in the target"]
+	$w.nb add $ff -text "Flash"
+	grid [button $ff.choose -state disabled -text "Choose file" \
+		-command "::Ocd::ev_ff_choose $obj"] -sticky we
+	grid [ttk::entry $ff.e -state disabled -textvariable ${obj}(flash:file)] \
+		-sticky nwse -row 0 -column 1 -columnspan 4
+	grid [button $ff.flash -state disabled -compound left \
+		-text "Flash" -command "::Ocd::ev_ff_flash $obj"] -sticky nwse -columnspan 5
+	grid columnconfigure $ff "all" -weight 1
+	
+	pack [ttk::entry $w.e -textvariable ${obj}(var:cmd) -state disabled] -fill x -side bottom
+  	pack [ttk::scrollbar $w.s -orient vertical -command "$w.log yview"] -side right -fill y
+	pack [text $w.log -wrap none -state disabled  -yscrollcommand "$w.s set"] -fill both -expand y
+	focus $w.e
+
+	$w.log tag configure input -foreground #007700
+	$w.log tag configure output -foreground #000077
+	$w.log tag configure info -foreground grey
+	$w.log tag configure warning -foreground orange
+	$w.log tag configure error -foreground red
+
+	bind $w.e <Return> [list ::Ocd::ev_cmd_transmit $obj]
+	bind $w.e <Down> [list ::Ocd::ev_cmd_history_cb $obj 0]
+ 	bind $w.e <Up> [list ::Ocd::ev_cmd_history_cb $obj 1]
+	bind $fc.scripts <<ComboboxSelected>> [list ::Ocd::setcfgfile $obj]
+	
+	return $obj
+}
+
+proc Ocd::exit {obj} {
+	upvar $obj self
+	
+	# disconnect from the target if it was connected
+	if {$self(data:connected)} {
+		$self(wid:top).nb.fc.f.connect invoke
+	}
+	
+	# save config options
+	set fp [open "$::env(HOME)/.ocd/ocdrc" w]
+	puts $fp "data:script $self(data:script)"
+	close $fp
+
+	::exit
+}
+
+proc Ocd::setcfgfile {obj} {
+	upvar $obj self
+	
+	# target config script changed, so disconnect the current target if any
+	if {$self(data:connected)} {
+		$self(wid:top).nb.fc.f.connect invoke
+	}
+}
+
+proc Ocd::connect {obj} {
+	upvar $obj self
+	variable ocd
+	
+	if {$self(data:connected)} {
+		$self(wid:top).nb.fc.f.reset configure -state active
+		$self(wid:top).nb.ff.choose configure -state active
+		$self(wid:top).nb.ff.e configure -state active
+		if [file exists $self(flash:file)] {
+			$self(wid:top).nb.ff.flash configure -state active
+		}
+		$self(wid:top).nb.fc.lbl configure -fg blue
+		$self(wid:top).e configure -state active
+		set self(label:connect) "Target connected"
+		catch {
+			set src $::env(HOME)/.ocd/scripts/$self(data:script)
+			if {[lsearch -exact $self(data:localscripts) $self(data:script)] != -1} {
+				set src $::env(PWD)/config/$self(data:script)
+			} elseif {[lsearch -exact $self(data:distscripts) $self(data:script)] != -1} {
+				set src [getpath openocd]/share/openocd/scripts/board/$self(data:script)
+			}
+
+			file copy -force -- $src $::env(HOME)/.ocd/scripts/_$self(data:script)
+
+			set self(data:io) [open "|openocd -f $::env(HOME)/.ocd/scripts/_$self(data:script) 2>@1" r]
+			fconfigure $self(data:io) -blocking 0
+			fileevent $self(data:io) readable [list ::Ocd::receive $obj]
+			set self(data:pid) [pid]
+			after 200
+			set self(io:sock) [socket localhost 6666]
+		} rc
+	} else {
+		set self(var:cmd) shutdown
+		ev_cmd_transmit $obj
+		$self(wid:top).nb.fc.f.reset configure -state disabled
+		$self(wid:top).nb.ff.choose configure -state disabled
+		$self(wid:top).nb.ff.e configure -state disabled
+		$self(wid:top).nb.ff.flash configure -state disabled
+		$self(wid:top).nb.fc.lbl configure -fg red
+		$self(wid:top).e configure -state disabled
+		set self(label:connect) "Target not connected"
+	}
+	focus $self(wid:top).e
+}
+
+proc Ocd::receive {obj} {
+	upvar $obj self
+	variable ocd
+
+	if {[set rc [gets $self(data:io) data]] == -1} {
+		if {[eof $self(data:io)]} {
+			if {$self(data:connected)} {
+				$self(wid:top).nb.fc.f.connect invoke
+			}
+			fileevent $self(data:io) r {}
+			close $self(data:io)
+			log $obj "Target disconnected!" error
+		}
+		return
+	}
+	
+	if [string match {Error: *} $data] {
+		log $obj [string range $data 7 end] error
+	} elseif [string match {Info : *} $data] {
+		log $obj [string range $data 7 end] info
+	}  elseif [string match {Warn : *} $data] {
+		log $obj [string range $data 7 end] warning
+	} else {
+		log $obj $data output
+	}
+}
+
+proc Ocd::ev_cmd_transmit {obj} {
+	upvar $obj self
+	variable ocd
+	
+	if {$self(var:cmd) != {}} {
+		# update cmd history
+		if {[lindex $self(var:cmd:hist) end] != $self(var:cmd)} {
+			lappend self(var:cmd:hist) $self(var:cmd)
+		}
+		set self(var:cmd:hist:pos) [llength $self(var:cmd:hist)]
+		set tmp $self(var:cmd)
+		set self(var:cmd) {}
+	} else {
+		# recall last command from history
+		set tmp [lindex $self(var:cmd:hist) [expr {[llength $self(var:cmd:hist)]-1}]]
+		# if empty history, get out of here
+		if {$tmp == {}} return
+	}
+
+    log $obj "> $tmp" input
+	catch {
+		puts $self(io:sock) "$tmp\x1a"
+		flush $self(io:sock)
+	} rc
+	$self(wid:top).e delete 0 end
+}
+
+proc Ocd::ev_cmd_reset {obj} {
+	upvar $obj self
+
+	set self(var:cmd) "reset halt"
+	ev_cmd_transmit $obj
+	focus $self(wid:top).e
+}
+
+proc Ocd::ev_ff_choose {obj} {
+	upvar $obj self
+	
+	set filetypes {
+		{{elf files} {.elf}				}
+		{{all files} *					}
+	}
+	
+	set self(flash:file) [tk_getOpenFile -title {Choose file to be flashed} \
+		-initialdir [pwd] -parent $self(wid:top) \
+		-filetypes $filetypes]
+		
+	if [file exists $self(flash:file)] {
+		$self(wid:top).nb.ff.flash configure -state active
+	}
+	focus $self(wid:top).e
+}
+
+proc Ocd::ev_ff_flash {obj} {
+	upvar $obj self
+	
+	if [file exists $self(flash:file)] {
+		set self(var:cmd) "flash write_image erase unlock $self(flash:file)"
+		ev_cmd_transmit $obj
+	}
+	
+	focus $self(wid:top).e
+}
+
+proc Ocd::log {obj text {tags {}}} {
+	upvar $obj self
+
+    $self(wid:top).log configure -state normal
+    $self(wid:top).log insert end "$text\n" $tags
+    $self(wid:top).log configure -state disabled
+    $self(wid:top).log see end
+}
+
+proc ::Ocd::ev_cmd_history_cb {obj dir} {
+	upvar $obj self
+
+	set l [llength $self(var:cmd:hist)]
+	if {$dir} {
+		if {$self(var:cmd:hist:pos) <= 0} {
+			set self(var:cmd) [lindex $self(var:cmd:hist) 0]
+			return
+		}
+		set self(var:cmd) [lindex $self(var:cmd:hist) [incr self(var:cmd:hist:pos) -1]]
+	} else {
+		set self(var:cmd) {}
+		if {$self(var:cmd:hist:pos) >= $l} {
+			return
+		}
+		set self(var:cmd) [lindex $self(var:cmd:hist) [incr self(var:cmd:hist:pos) 1]]
+	}
+	$self(wid:top).e icursor end
+}
+
+if {[info script] == $argv0} {
+    #lappend auto_path [file dirname $argv0]
+	set o1 [Ocd::new]
+}

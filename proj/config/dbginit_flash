@@ -1,0 +1,24 @@
+#! arm-none-eabi-gdb
+open src/*.c lib/*.s lib/*.c
+target extended-remote localhost:3333
+###################################################
+# Uncomment this part to run the program from FLASH
+monitor reset
+monitor halt
+monitor mww 0xE01FC080 0x01
+monitor mww 0xE01FC08C 0xAA
+monitor mww 0xE01FC08C 0x55
+monitor sleep 200
+monitor mww 0xE01FC080 0x00
+monitor mww 0xE01FC08C 0xAA
+monitor mww 0xE01FC08C 0x55
+monitor sleep 200
+###################################################
+# Uncomment this part to run the program from RAM
+#monitor soft_reset_halt
+#monitor mww 0xE01FC040 2
+#monitor mww 0xE01FC0C4 0x801817BE
+###################################################
+load
+tbreak main
+continue
