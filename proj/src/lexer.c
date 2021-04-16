@@ -14,6 +14,7 @@ CMD cmds[]={
 	{"di", T_DISK_INIT},
 	{"ds", T_DISK_STATUS},
 	{"dd", T_DISK_DUMP},
+	{"step", T_STEP},
 	{"help", T_HELP}
 };
 

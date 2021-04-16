@@ -10,8 +10,9 @@ typedef enum {
 	T_DISK_INIT,	/* cmd tokens */
 	T_DISK_STATUS,
 	T_DISK_DUMP,
+	T_STEP,
 	
-	T_TEXT,		/* token is a label */
+	T_TEXT,			/* token is a label */
     T_NUM,			/* token is a numerical value */
 	
 	T_HELP,			/* ? for help token */

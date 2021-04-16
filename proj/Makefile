@@ -7,7 +7,8 @@
 #PROJ = main_i2c
 #PROJ = main_spi
 #PROJ = main_adc
-PROJ = main_sd
+#PROJ = main_sd
+PROJ = main_stepper
 
 # Define linker script file here
 #LDSCRIPT = config/flash.lds

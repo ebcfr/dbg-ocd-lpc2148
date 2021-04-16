@@ -237,7 +237,7 @@ used to debug standard or microcontroller programs.
 <p align="center"><img src="img/dbg.png"></p>
 
 It uses a config file named `.dbginit` (hidden file) which have to be at the 
-root of the project. For example, for the AT91 project, we have
+root of the project. For example, for the LPC2148 project, we have
 
 ```
 #! arm-none-eabi-gdb
